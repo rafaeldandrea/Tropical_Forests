@@ -1,0 +1,96 @@
+---
+title: "R code"
+author: "Rafael D'Andrea & Sabiq Shahab"
+date: '2022-07-05'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libraries}
+library(tidyverse)
+```
+
+```{r plotting_theme}
+theme_set(theme_bw())
+theme_update(
+  panel.grid = element_blank(),
+  strip.background = element_rect(fill = 'orange')
+)
+```
+
+
+```{r read_data_from_github}
+
+tapajos_address = 'https://raw.githubusercontent.com/rafaeldandrea/Tropical_Forests/main/Data/Tapajos_inventory_data_2010.csv'
+
+dat0 = read_csv(url(tapajos_address))
+```
+
+
+```{r filter_by_min_abuns(6), message = FALSE, echo = TRUE}
+abuns =
+  dat0 |>
+  count(scientific_name) |>
+  filter(n >= 6)
+
+dat = 
+  dat0 |>
+  inner_join(abuns)
+```
+
+
+
+```{r max_traits}
+max_dbh = 
+  dat |>
+  group_by(scientific_name) |>
+  slice_max(dbh, n = 6) |>
+  ungroup() |>
+  group_by(scientific_name) |>
+  summarize(max_dbh = mean(dbh), .groups = 'drop')
+
+max_height = 
+  dat |>
+  group_by(scientific_name) |>
+  slice_max(ht_total, n = 6) |>
+  ungroup() |>
+  group_by(scientific_name) |>
+  summarize(max_height = mean(ht_total), .groups = 'drop')
+
+max_trait =
+  max_dbh |>
+  inner_join(max_height)
+
+```
+
+
+```{r filter_by_dbh}
+adult_abuns = 
+  dat |>
+  inner_join(max_trait, by = 'scientific_name') |>
+  filter(dbh >= max_dbh/2) |>
+  count(scientific_name)
+  
+```
+
+
+```{r join_traits_&_abundances}
+tapajos = 
+  max_height |>
+  inner_join(adult_abuns)
+  
+```
+
+```{r plot_community}
+plot = 
+  tapajos |>
+  ggplot() +
+  geom_segment(aes(x = max_height, xend = max_height, y = rep(0, nrow(tapajos)),yend = n))
+
+plot |>
+  show()
+```
+
