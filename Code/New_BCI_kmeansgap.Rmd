@@ -1,0 +1,291 @@
+---
+title: "New BCI kmeans-gap analysis"
+author: "Rafael D'Andrea"
+date: '2022-06-17'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE)
+```
+
+```{r}
+library(tidyverse)
+library(SWKM)
+library(furrr)
+library(parallel)
+library(rstatix)
+
+theme_set(theme_bw())
+theme_update(
+  panel.grid = element_blank(),
+  strip.background = element_rect(fill = 'orange')
+)
+
+cores = detectCores() - 1
+plan(multisession, workers = cores)
+```
+
+```{r}
+remove.outliers = TRUE
+```
+
+
+Census data from `G:/My Drive/Stony Brook University/Research/BCI/bci.tree/bci.tree7.rdata`.
+
+Trait data from `G:/My Drive/Stony Brook University/Research/BCI/BCITRAITS_NEW.csv`.
+
+Trees are counted which exceed half of the max dbh for their species.
+
+Traits:
+
+- height = HEIGHT_AVD
+- leaf = log(LMALAM_AVD)
+- seed = log(SEED_DRY)
+- wood = SG60C_AVG
+
+Number of nulls: 500
+
+Metric: abundance-weighted k-means from package `SWKM`.
+
+```{r}
+bci = 
+  get(load('G:/My Drive/Stony Brook University/Research/BCI/bci.tree/bci.tree7.rdata')) |> 
+  as_tibble() |>
+  drop_na(dbh)
+
+zo_scale = function(x){
+  max_x = max(x, na.rm = TRUE)
+  min_x = min(x, na.rm = TRUE)
+  return((x - min_x) / (max_x - min_x))
+} 
+
+traits = 
+  read.csv('G:/My Drive/Stony Brook University/Research/BCI/BCITRAITS_NEW.csv') |> 
+  as_tibble() |>
+  mutate(sp = tolower(SP.)) |>
+  select(
+    sp, 
+    genus = `GENUS.`, 
+    species = `SPECIES.`, 
+    height = HEIGHT_AVG, 
+    wood = SG60C_AVG,
+    seed = SEED_DRY,
+    leaf = LMALAM_AVD,
+    maxdbh = DBH_AVG
+  ) |>
+  mutate(
+    seed = log(seed),
+    leaf = log(leaf)
+  )
+
+dtf = 
+  bci |>
+  full_join(traits, by = 'sp')
+
+abuns = 
+  dtf |>
+  group_by(sp) |>
+  summarize(abun = sum(dbh >= maxdbh / 2)) |>
+  drop_na()
+
+dat = 
+  abuns |>
+  inner_join(traits, by = 'sp') |>
+  mutate(
+    across(height:leaf, zo_scale)
+  ) |>
+  pivot_longer(height:leaf, names_to = 'trait') |>
+  drop_na()
+  
+```
+
+
+```{r}
+plot_boxes =
+  dat |> 
+  ggplot(aes(trait, value, fill = trait)) + 
+  geom_boxplot() + 
+  theme(legend.position = 'none')
+
+plot_boxes |>
+  show()
+```
+
+
+```{r}
+if(remove.outliers){
+  
+  writeLines('Outliers are being removed from kmeans analysis')
+  
+  dat = 
+    dat |>
+    anti_join(
+      dat |> 
+        group_by(trait) |> 
+        identify_outliers(value)
+    )
+}   
+```
+
+
+```{r}
+plot = 
+  dat |>
+  ggplot() +
+  geom_segment(
+    aes(
+      x = value, 
+      y = rep(0, nrow(dat)), 
+      xend = value, 
+      yend = abun
+      )
+    ) +
+  labs(x = 'Trait', y ='Abundance (dbh > dbh_max/2)') +
+  coord_cartesian(ylim = c(0, 700)) +
+  facet_wrap(~trait, scales = 'free')
+
+plot |>
+  show()
+
+plot_hists = 
+  dat |>
+  ggplot(aes(value)) +
+  geom_histogram() +
+  facet_wrap(~trait, scales = 'free')
+```
+
+
+```{r eval=FALSE}
+
+cents = matrix(quantile(dat$height, 1:4/4), 4, 1)
+
+res = 
+  kmeans.weight(
+    x = matrix(dat$height, nrow(dat), 1), 
+    K = 4, 
+    nstart = 100,
+    weight = dat$abun, centers = cents
+  )
+
+dat =
+  dat |>
+  mutate(cluster = as.factor(res$cluster))
+
+plot1 = 
+  dat |>
+  ggplot() +
+  geom_segment(
+    aes(
+      x = height, 
+      y = rep(0, nrow(dat)), 
+      xend = height, 
+      yend = abun, 
+      color = cluster
+      )
+    ) +
+  labs(x = 'Species Trait', y ='Species Abundance') +
+  coord_cartesian(ylim = c(0, 700)) +
+  theme(legend.position = c(.9,.6))
+
+plot1 |>
+  show()
+
+dat |>
+  select(-maxdbh) |>
+  write.csv('G:/My Drive/Stony Brook University/Research/BCI/BCI_heightclusters.csv')
+```
+
+```{r}
+
+maxclust = 10
+
+null_dtf =
+  expand_grid(
+    clusters = 2:maxclust,
+    null = 0:500,
+    traits = unique(dat$trait)
+  )
+
+myfun = 
+  function(clusters, null, traits){
+    
+    data = 
+      dat |>
+      filter(trait == traits)
+    
+    set.seed(null)
+    
+    if (null == 0)
+      ns = data$abun
+    else
+      ns = sample(data$abun)
+    
+    cents = matrix(quantile(data$value, 1:clusters / clusters), clusters, 1)
+    
+    wcss =
+      kmeans.weight(
+        x = matrix(data$value, nrow(data), 1),
+        K = clusters,
+        nstart = 100,
+        weight = ns,
+        centers = cents
+      ) |>
+      pluck('wcss')
+    
+    return(tibble(clusters = clusters, null = null, trait = traits, wcss = wcss))
+  }
+
+kmeanres = 
+  null_dtf |>
+  future_pmap_dfr(
+    .f = myfun,
+    .options = furrr_options(seed = NULL)
+  )
+
+stats = 
+  kmeanres |> 
+  group_by(trait, clusters) |> 
+  summarize(
+    mu = mean(wcss), 
+    sigma = sd(wcss),
+    .groups = 'drop'
+  )
+
+res2 =
+  stats |>
+  inner_join(
+    kmeanres,
+    by = c('trait','clusters')
+  ) |>
+  mutate(gap = log(mu) - log(wcss))
+
+quants =
+  res2 |>
+  group_by(trait, null) |>
+  slice_max(gap) |>
+  group_by(trait) |>
+  summarize(qtl = quantile(gap, .95))
+```
+
+```{r}
+  
+plot_gap = 
+  res2 |>
+  filter(null == 0) |>
+  ggplot(aes(clusters, gap)) +
+  geom_line() +
+  geom_point() +
+  geom_hline(
+    aes(yintercept = qtl), 
+    data = quants, 
+    color = 'red'
+  ) +
+  facet_wrap(~trait)
+  
+
+plot_gap |>
+  show()
+
+```
+
